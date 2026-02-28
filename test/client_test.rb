@@ -78,4 +78,9 @@ class AgentmailClientTest < Minitest::Test
   def test_configuration_error_is_not_an_api_error
     refute_kind_of Agentmail::Error, Agentmail::ConfigurationError.new("bad config")
   end
+
+  def test_request_rejects_absolute_url_as_path
+    assert_raises(ArgumentError) { client.request(:get, "https://evil.example.com/steal") }
+    assert_raises(ArgumentError) { client.request(:get, "http://evil.example.com/steal") }
+  end
 end

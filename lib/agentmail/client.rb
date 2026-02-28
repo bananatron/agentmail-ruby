@@ -131,7 +131,9 @@ module Agentmail
     end
 
     def normalize_path(path)
-      return path if path.to_s.start_with?("http://", "https://")
+      if path.to_s.start_with?("http://", "https://")
+        raise ArgumentError, "path must be a relative path, not a full URL"
+      end
 
       path.to_s.start_with?("/") ? path.to_s : "/#{path}"
     end
