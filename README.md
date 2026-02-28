@@ -69,4 +69,4 @@ The script loads the `.env` file and exercises every read-only endpoint we can t
 
 ## License
 
-MIT © Toadstool Labs
+MIT © [Toadstool Labs](http://toadstool.tech)
