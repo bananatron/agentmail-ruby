@@ -55,6 +55,15 @@ bundle exec rake test
 
 The codebase deliberately avoids code generation so a contributor can read through the API surface. If you need an endpoint that is not wrapped yet, either open a PR or call it directly via `Client#request`.
 
+### Publishing to RubyGems
+
+1. Grab your RubyGems API key (`curl -u you https://rubygems.org/api/v1/api_key.yaml`) and add it to the repository as the `RUBYGEMS_API_KEY` secret under **Settings → Secrets and variables → Actions**.
+2. Bump `Agentmail::VERSION` in `lib/agentmail/version.rb`, update the changelog, and commit the changes.
+3. Create a version tag that matches the gem version: `git tag vX.Y.Z`.
+4. Push the tag: `git push origin vX.Y.Z`.
+
+When GitHub receives the tag, the `release.yml` workflow builds the gem, runs the test suite, and publishes the `.gem` to RubyGems using the stored API key. If the tag and gem versions do not match, or the tests fail, the workflow aborts without publishing.
+
 ## Manual Smoke Test
 
 1. Copy `.env.example` to `.env` and add your `AGENTMAIL_API_KEY`. Optionally set `SMOKE_TEST_RECIPIENT` if you want to exercise outbound email delivery.
