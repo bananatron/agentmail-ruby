@@ -1,0 +1,376 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "bundler/setup"
+require "json"
+require "time"
+
+require "agentmail"
+
+class SmokeTest
+  def initialize
+    load_env_file(env_path)
+    @api_key = ENV["AGENTMAIL_API_KEY"]
+    @recipient = ENV["SMOKE_TEST_RECIPIENT"]
+    @send_email = truthy?(ENV["SMOKE_TEST_SEND_EMAIL"])
+    assert_api_key!
+    @client = Agentmail::Client.new(api_key: @api_key)
+    @results = []
+    @context = {}
+  end
+
+  def run
+    puts "Running AgentMail smoke test..."
+    check_organization
+    check_api_keys
+    check_pods
+    check_domains
+    check_webhooks
+    check_lists
+    check_global_metrics
+    check_global_drafts
+    check_threads
+    check_inboxes
+    send_test_email if @send_email
+    summarize
+  end
+
+  private
+
+  attr_reader :client, :results, :context
+
+  def env_path
+    @env_path ||= File.expand_path("../.env", __dir__)
+  end
+
+  def load_env_file(path)
+    return unless File.exist?(path)
+
+    File.foreach(path) do |line|
+      stripped = line.strip
+      next if stripped.empty? || stripped.start_with?("#")
+
+      key, value = stripped.split("=", 2)
+      next unless key && value
+
+      ENV[key] ||= value.gsub(/\A['"]|['"]\z/, "")
+    end
+  end
+
+  def assert_api_key!
+    return if @api_key && !@api_key.empty?
+
+    warn "Set AGENTMAIL_API_KEY in #{env_path} or the environment before running this smoke test."
+    exit 1
+  end
+
+  def truthy?(value)
+    %w[1 true yes on].include?(value.to_s.strip.downcase)
+  end
+
+  def metrics_window
+    @metrics_window ||= begin
+      finish = Time.now.utc
+      start = finish - (7 * 24 * 60 * 60)
+      {
+        start_timestamp: start.iso8601,
+        end_timestamp: finish.iso8601
+      }
+    end
+  end
+
+  def perform(name, success: nil)
+    print "→ #{name}... "
+    data = yield
+    detail = success.is_a?(Proc) ? success.call(data) : success
+    puts "ok#{detail ? " (#{detail})" : ""}"
+    results << {name:, status: :ok}
+    data
+  rescue Agentmail::Error => e
+    puts "FAILED (status #{e.status || 'n/a'})"
+    warn_detail(e.body)
+    results << {name:, status: :failed, error: "#{e.class}: #{e.message}"}
+    nil
+  rescue StandardError => e
+    puts "FAILED (#{e.class}: #{e.message})"
+    results << {name:, status: :failed, error: "#{e.class}: #{e.message}"}
+    nil
+  end
+
+  def skip(name, reason)
+    puts "→ #{name}... skipped (#{reason})"
+    results << {name:, status: :skipped, reason: reason}
+  end
+
+  def warn_detail(body)
+    return unless body
+
+    formatted = body.is_a?(String) ? body : JSON.pretty_generate(body)
+    warn "  • #{formatted}"
+  end
+
+  def request(method, path, **options)
+    client.request(method, path, **options).body
+  end
+
+  def count_from(data, key)
+    Array(data.is_a?(Hash) ? data[key] : nil).size
+  end
+
+  def check_organization
+    perform("Get organization") { request(:get, "/v0/organizations") }
+  end
+
+  def check_api_keys
+    response = perform("List API keys", success: ->(data) { "#{count_from(data, 'api_keys')} found" }) do
+      request(:get, "/v0/api-keys")
+    end
+    first = response && response["api_keys"]&.first
+    context[:api_key_id] = first && first["api_key_id"]
+  end
+
+  def check_pods
+    response = perform("List pods", success: ->(data) { "#{count_from(data, 'pods')} found" }) do
+      request(:get, "/v0/pods", params: {limit: 5})
+    end
+    pod = response && response["pods"]&.first
+    context[:pod_id] ||= pod && pod["pod_id"]
+
+    if context[:pod_id]
+      perform("Get pod #{context[:pod_id]}") { request(:get, "/v0/pods/#{context[:pod_id]}") }
+      perform("List pod drafts", success: ->(data) { "#{count_from(data, 'drafts')} found" }) do
+        request(:get, "/v0/pods/#{context[:pod_id]}/drafts", params: {limit: 5})
+      end
+      perform("List pod domains", success: ->(data) { "#{count_from(data, 'domains')} found" }) do
+        request(:get, "/v0/pods/#{context[:pod_id]}/domains", params: {limit: 5})
+      end
+      perform("List pod send allow list", success: ->(data) { "#{count_from(data, 'entries')} entries" }) do
+        request(:get, "/v0/pods/#{context[:pod_id]}/lists/send/allow", params: {limit: 5})
+      end
+    else
+      skip("Pod detail checks", "no pods available")
+    end
+  end
+
+  def check_domains
+    response = perform("List domains", success: ->(data) { "#{count_from(data, 'domains')} found" }) do
+      request(:get, "/v0/domains", params: {limit: 5})
+    end
+    domain = response && response["domains"]&.first
+    context[:domain_id] = domain && domain["domain_id"]
+
+    if context[:domain_id]
+      perform("Get domain #{context[:domain_id]}") { request(:get, "/v0/domains/#{context[:domain_id]}") }
+      perform("Get domain zone file #{context[:domain_id]}") do
+        request(:get, "/v0/domains/#{context[:domain_id]}/zone-file")
+      end
+    else
+      skip("Domain detail checks", "no domains available")
+    end
+  end
+
+  def check_webhooks
+    perform("List webhooks", success: ->(data) { "#{count_from(data, 'webhooks')} found" }) do
+      request(:get, "/v0/webhooks", params: {limit: 5})
+    end
+  end
+
+  def check_lists
+    %w[allow block].each do |type|
+      perform("List send #{type} list", success: ->(data) { "#{count_from(data, 'entries')} entries" }) do
+        request(:get, "/v0/lists/send/#{type}", params: {limit: 5})
+      end
+      perform("List receive #{type} list", success: ->(data) { "#{count_from(data, 'entries')} entries" }) do
+        request(:get, "/v0/lists/receive/#{type}", params: {limit: 5})
+      end
+    end
+  end
+
+  def check_global_metrics
+    perform("List organization metrics (7d)") do
+      request(:get, "/v0/metrics", params: metrics_window)
+    end
+  end
+
+  def check_global_drafts
+    response = perform("List drafts", success: ->(data) { "#{count_from(data, 'drafts')} found" }) do
+      request(:get, "/v0/drafts", params: {limit: 5})
+    end
+    draft = response && response["drafts"]&.first
+    if draft
+      draft_id = draft["draft_id"]
+      perform("Get draft #{draft_id}") { request(:get, "/v0/drafts/#{draft_id}") }
+    else
+      skip("Draft detail check", "no drafts available")
+    end
+  end
+
+  def check_threads
+    response = perform("List threads", success: ->(data) { "#{count_from(data, 'threads')} found" }) do
+      client.threads.list(limit: 5)
+    end
+    thread = response && response["threads"]&.first
+    context[:thread_id] ||= thread && thread["thread_id"]
+
+    if context[:thread_id]
+      perform("Get thread #{context[:thread_id]}") { request(:get, "/v0/threads/#{context[:thread_id]}") }
+      attachments = thread && thread["attachments"]
+      if attachments && !attachments.empty?
+        attachment_id = attachments.first["attachment_id"]
+        perform("Get thread attachment #{attachment_id}") do
+          request(:get, "/v0/threads/#{context[:thread_id]}/attachments/#{attachment_id}")
+        end
+      else
+        skip("Thread attachment download", "sample thread has no attachments")
+      end
+    else
+      skip("Thread detail checks", "no threads available")
+    end
+  end
+
+  def check_inboxes
+    response = perform("List inboxes", success: ->(data) { "#{count_from(data, 'inboxes')} found" }) do
+      client.inboxes.list
+    end
+    inbox = response && response["inboxes"]&.first
+    context[:inbox_id] = inbox && (inbox["inbox_id"] || inbox["id"])
+    context[:pod_id] ||= inbox && inbox["pod_id"]
+
+    if context[:inbox_id]
+      perform("Get inbox #{context[:inbox_id]}") { request(:get, "/v0/inboxes/#{context[:inbox_id]}") }
+      perform("List inbox metrics #{context[:inbox_id]}") do
+        request(:get, "/v0/inboxes/#{context[:inbox_id]}/metrics", params: metrics_window)
+      end
+      check_inbox_messages
+      check_inbox_threads
+      check_inbox_drafts
+    else
+      skip("Inbox detail checks", "no inbox available")
+    end
+  end
+
+  def check_inbox_messages
+    response = perform("List messages for inbox #{context[:inbox_id]}", success: ->(data) { "#{count_from(data, 'messages')} returned" }) do
+      request(:get, "/v0/inboxes/#{context[:inbox_id]}/messages", params: {limit: 5})
+    end
+    message = response && response["messages"]&.first
+    unless message
+      skip("Inbox message detail", "no messages available")
+      skip("Inbox message attachment", "no messages available")
+      return
+    end
+
+    context[:message_id] = message["message_id"]
+    context[:thread_id] ||= message["thread_id"]
+
+    perform("Get message #{context[:message_id]} in inbox #{context[:inbox_id]}") do
+      request(:get, "/v0/inboxes/#{context[:inbox_id]}/messages/#{context[:message_id]}")
+    end
+
+    attachments = message["attachments"]
+    if attachments && !attachments.empty?
+      attachment_id = attachments.first["attachment_id"]
+      perform("Get message attachment #{attachment_id}") do
+        request(
+          :get,
+          "/v0/inboxes/#{context[:inbox_id]}/messages/#{context[:message_id]}/attachments/#{attachment_id}"
+        )
+      end
+    else
+      skip("Message attachment download", "sample message has no attachments")
+    end
+  end
+
+  def check_inbox_threads
+    response = perform("List threads for inbox #{context[:inbox_id]}", success: ->(data) { "#{count_from(data, 'threads')} returned" }) do
+      request(:get, "/v0/inboxes/#{context[:inbox_id]}/threads", params: {limit: 5})
+    end
+    thread = response && response["threads"]&.first
+    unless thread
+      skip("Inbox thread detail", "no threads available")
+      skip("Inbox thread attachment", "no threads available")
+      return
+    end
+
+    thread_id = thread["thread_id"]
+    perform("Get inbox thread #{thread_id}") do
+      request(:get, "/v0/inboxes/#{context[:inbox_id]}/threads/#{thread_id}")
+    end
+
+    attachments = thread["attachments"]
+    if attachments && !attachments.empty?
+      attachment_id = attachments.first["attachment_id"]
+      perform("Get inbox thread attachment #{attachment_id}") do
+        request(
+          :get,
+          "/v0/inboxes/#{context[:inbox_id]}/threads/#{thread_id}/attachments/#{attachment_id}"
+        )
+      end
+    else
+      skip("Inbox thread attachment", "sample thread has no attachments")
+    end
+  end
+
+  def check_inbox_drafts
+    response = perform("List drafts for inbox #{context[:inbox_id]}", success: ->(data) { "#{count_from(data, 'drafts')} returned" }) do
+      request(:get, "/v0/inboxes/#{context[:inbox_id]}/drafts", params: {limit: 5})
+    end
+    draft = response && response["drafts"]&.first
+    if draft
+      draft_id = draft["draft_id"]
+      perform("Get inbox draft #{draft_id}") do
+        request(:get, "/v0/inboxes/#{context[:inbox_id]}/drafts/#{draft_id}")
+      end
+    else
+      skip("Inbox draft detail", "no drafts available")
+    end
+  end
+
+  def send_test_email
+    unless context[:inbox_id]
+      skip("Send smoke-test email", "no inbox available")
+      return
+    end
+
+    if @recipient.to_s.empty?
+      skip("Send smoke-test email", "SMOKE_TEST_RECIPIENT not set")
+      return
+    end
+
+    subject = "AgentMail smoke test #{Time.now.utc.iso8601}"
+    body = {
+      to: @recipient,
+      subject: subject,
+      text: "Smoke test triggered at #{subject}.",
+      labels: ["smoke-test"]
+    }
+
+    perform("Send smoke-test email to #{@recipient}") do
+      request(:post, "/v0/inboxes/#{context[:inbox_id]}/messages", body: body)
+    end
+  end
+
+  def summarize
+    success = results.count { |r| r[:status] == :ok }
+    skipped = results.count { |r| r[:status] == :skipped }
+    failures = results.select { |r| r[:status] == :failed }
+
+    puts
+    puts "Smoke test complete: #{success} ok, #{skipped} skipped, #{failures.count} failed."
+    if @send_email && @recipient.to_s.empty?
+      puts "Email send step was skipped because SMOKE_TEST_RECIPIENT is not set."
+    elsif !@send_email
+      puts "Email send step was skipped. Set SMOKE_TEST_SEND_EMAIL=true (with SMOKE_TEST_RECIPIENT) to exercise outbound delivery."
+    end
+
+    if failures.any?
+      puts "Failures:"
+      failures.each do |failure|
+        puts "  - #{failure[:name]}: #{failure[:error]}"
+      end
+      exit 1
+    end
+  end
+end
+
+SmokeTest.new.run
