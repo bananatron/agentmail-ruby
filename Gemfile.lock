@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    agentmail (0.1.0)
+    agentmail (0.2.0)
       faraday (>= 2.0)
 
 GEM
@@ -70,7 +70,7 @@ DEPENDENCIES
 
 CHECKSUMS
   addressable (2.8.9) sha256=cc154fcbe689711808a43601dee7b980238ce54368d23e127421753e46895485
-  agentmail (0.1.0)
+  agentmail (0.2.0)
   bigdecimal (4.1.0) sha256=6dc07767aa3dc456ccd48e7ae70a07b474e9afd7c5bc576f80bd6da5c8dd6cae
   crack (1.0.1) sha256=ff4a10390cd31d66440b7524eb1841874db86201d5b70032028553130b6d4c7e
   date (3.5.1) sha256=750d06384d7b9c15d562c76291407d89e368dda4d4fff957eb94962d325a0dc0
