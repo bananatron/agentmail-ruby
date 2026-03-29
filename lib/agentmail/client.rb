@@ -6,6 +6,7 @@ require "faraday"
 require_relative "error"
 require_relative "response"
 require_relative "resources/inboxes"
+require_relative "resources/pods"
 require_relative "resources/threads"
 
 module Agentmail
@@ -45,6 +46,10 @@ module Agentmail
 
     def inboxes
       @inboxes ||= Resources::Inboxes.new(self)
+    end
+
+    def pods
+      @pods ||= Resources::Pods.new(self)
     end
 
     def threads
